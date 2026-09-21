@@ -1,0 +1,69 @@
+{
+	"manifest_version": 3,
+	"name": "MRU Tabs",
+	"version": "1.0.0",
+	"description": "Ctrl+Tab walks a recency-ordered tab list and lands when you let go.",
+	"minimum_chrome_version": "121",
+	"permissions": [
+		"tabs",
+		"storage",
+		"scripting",
+		"favicon"
+	],
+	"host_permissions": [
+		"<all_urls>"
+	],
+	"background": {
+		"service_worker": "src/sw.js",
+		"type": "module"
+	},
+	"content_scripts": [
+		{
+			"matches": [
+				"<all_urls>"
+			],
+			"all_frames": false,
+			"run_at": "document_start",
+			"js": [
+				"src/overlay.js"
+			]
+		},
+		{
+			"matches": [
+				"<all_urls>"
+			],
+			"all_frames": true,
+			"match_about_blank": true,
+			"run_at": "document_start",
+			"js": [
+				"src/content.js"
+			]
+		}
+	],
+	"commands": {
+		"step-forward": {
+			"suggested_key": {
+				"default": "Alt+Q",
+				"mac": "MacCtrl+Q"
+			},
+			"description": "Step towards the more recent tabs"
+		},
+		"step-backward": {
+			"suggested_key": {
+				"default": "Alt+Shift+Q",
+				"mac": "MacCtrl+Shift+Q"
+			},
+			"description": "Step back down the recency list"
+		}
+	},
+	"web_accessible_resources": [
+		{
+			"resources": [
+				"_favicon/*"
+			],
+			"matches": [
+				"<all_urls>"
+			]
+		}
+	]
+}

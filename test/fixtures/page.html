@@ -1,0 +1,46 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>placeholder</title>
+<link rel="icon" href="/icon.png">
+<style>body{font:16px system-ui;margin:0;display:grid;place-items:center;height:100vh;background:#f4f5f7}</style>
+<h1 id="name">placeholder</h1>
+<script>
+	const name = new URLSearchParams(location.search).get("name") || "page";
+
+	document.title = name;
+	document.getElementById("name").textContent = name;
+
+		// pages like Meet and Docs move focus into their own subframes
+		// constantly, and the top window fires blur every time
+	if (new URLSearchParams(location.search).has("iframe")) {
+		const frame = document.createElement("iframe");
+
+		frame.style.cssText = "position:fixed;left:0;bottom:0;width:200px;height:60px";
+		frame.srcdoc = "<input id=inner>";
+		document.body.append(frame);
+	}
+
+		// the browser's top layer: a modal dialog paints above every z-index
+		// there is, which is how Google Meet's permission prompt hid the list
+	if (new URLSearchParams(location.search).has("dialog")) {
+		const dialog = document.createElement("dialog");
+
+		dialog.style.cssText = "position:fixed;inset:0;width:100vw;height:100vh;max-width:none;"
+			+ "max-height:none;margin:0;padding:0;border:none;background:rgb(255,0,0)";
+		document.body.append(dialog);
+		dialog.showModal();
+	}
+
+		// a page that fights for the keyboard the way a canvas app does.  these
+		// listeners are registered after the content script's, on the same
+		// target, in both phases -- a capture listener installed at
+		// document_start still runs first, which is the claim under test.
+	if (new URLSearchParams(location.search).has("hostile")) {
+		for (const type of ["keydown", "keyup"]) {
+			for (const capture of [true, false]) {
+				window.addEventListener(type, (event) => event.stopImmediatePropagation(), capture);
+				document.addEventListener(type, (event) => event.stopImmediatePropagation(), capture);
+			}
+		}
+	}
+</script>
