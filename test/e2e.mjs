@@ -151,6 +151,60 @@ async function centrePixel(
 }
 
 
+	// how many screen pixels across the centre row are not the red dialog,
+	// which is the card plus its shadow
+async function cardWidth(
+	page)
+{
+	const { width, height } = page.viewportSize() ?? { width: 1280, height: 720 };
+	const png = await page.screenshot({
+		clip: { x: 0, y: Math.floor(height / 2), width, height: 1 },
+	});
+
+	const chunks = [];
+	let channels = 3;
+
+	for (let at = 8; at < png.length;) {
+		const size = png.readUInt32BE(at);
+		const kind = png.toString("ascii", at + 4, at + 8);
+
+		if (kind === "IHDR") {
+			channels = png[at + 8 + 9] === 6 ? 4 : 3;
+		} else if (kind === "IDAT") {
+			chunks.push(png.subarray(at + 8, at + 8 + size));
+		}
+
+		at += size + 12;
+	}
+
+	const raw = inflateSync(Buffer.concat(chunks));
+	const filter = raw[0];
+	const row = raw.subarray(1);
+
+		// a single scanline has no row above it, so Up is None and Paeth
+		// reduces to Sub
+	for (let at = 0; at < row.length; at++) {
+		const left = at >= channels ? row[at - channels] : 0;
+
+		if (filter === 1 || filter === 4) {
+			row[at] = (row[at] + left) & 0xff;
+		} else if (filter === 3) {
+			row[at] = (row[at] + (left >> 1)) & 0xff;
+		}
+	}
+
+	let count = 0;
+
+	for (let at = 0; at < row.length; at += channels) {
+		if (!(row[at] === 255 && row[at + 1] === 0 && row[at + 2] === 0)) {
+			count++;
+		}
+	}
+
+	return count;
+}
+
+
 before(async () => {
 	await serve();
 
@@ -413,6 +467,50 @@ test("the list paints above a modal dialog in the top layer", async () => {
 
 	await Promise.all([alpha.close(), beta.close()]);
 });
+
+test("the list is the same size on screen whatever the tab's zoom", async () => {
+	const alpha = await openPage("alpha");
+	const beta = await openPage("beta", "&dialog");
+
+	const measure = async (factor) => {
+		await worker.evaluate(async (factor) => {
+			const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+
+			await chrome.tabs.setZoom(tab.id, factor);
+		}, factor);
+		await beta.waitForTimeout(200);
+
+		await beta.keyboard.down("Control");
+		await gesture(Forward);
+		await beta.waitForTimeout(400);
+
+		const width = await cardWidth(beta);
+
+		await beta.screenshot({ path: join(shots, `overlay-zoom-${factor}.png`) });
+		await beta.keyboard.press("Escape");
+		await beta.keyboard.up("Control");
+		await beta.waitForTimeout(300);
+
+		return width;
+	};
+
+	const plain = await measure(1);
+	const big = await measure(2);
+	const small = await measure(0.5);
+
+	await worker.evaluate(async () => {
+		const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+
+		await chrome.tabs.setZoom(tab.id, 0);
+	});
+
+	assert.ok(plain > 400, `the card is on screen (${plain}px)`);
+	assert.ok(Math.abs(big - plain) <= 2, `200% draws it at ${big}px, not ${plain}px`);
+	assert.ok(Math.abs(small - plain) <= 2, `50% draws it at ${small}px, not ${plain}px`);
+
+	await Promise.all([alpha.close(), beta.close()]);
+});
+
 
 test("with the modifier unreadable, a walk keeps the list up long enough to read", async () => {
 	const alpha = await openPage("alpha");
