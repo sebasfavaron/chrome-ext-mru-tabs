@@ -117,6 +117,11 @@ async function show(
 	}
 
 	try {
+			// the card is drawn at the screen's scale, not the page's: without
+			// this a tab at 175% shows a list that runs off both edges and one
+			// at 50% shows one too small to read
+		const zoom = await chrome.tabs.getZoom(tabId).catch(() => 1);
+
 		await chrome.tabs.sendMessage(tabId, {
 			type: "session",
 			on: true,
@@ -130,6 +135,7 @@ async function show(
 				// for a page's CSP to refuse
 			bounds: rowWindow(index, length, MAX_ROWS),
 			delay: OVERLAY_DELAY_MS,
+			zoom,
 			maxHold: MAX_HOLD_MS,
 		});
 

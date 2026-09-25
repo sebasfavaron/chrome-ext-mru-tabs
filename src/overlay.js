@@ -28,11 +28,16 @@ const Styles = `
 	left: 50%;
 	transform: translate(-50%, -50%);
 	z-index: 2147483647;
+	/* the tab's zoom, set per render.  zoom by its inverse cancels it, so
+	   every px below is a screen px whatever the page is at.  zoom scales
+	   vw and vh as well, which is why the caps multiply them back */
+	--page-zoom: 1;
+	zoom: calc(1 / var(--page-zoom));
 	width: 480px;
-	max-width: calc(100vw - 48px);
-	/* a short window or a zoomed page would otherwise push the highlighted
-	   row off the top of the screen, which is the one row that matters */
-	max-height: calc(100vh - 48px);
+	max-width: calc(100vw * var(--page-zoom) - 48px);
+	/* a short window would otherwise push the highlighted row off the top
+	   of the screen, which is the one row that matters */
+	max-height: calc(100vh * var(--page-zoom) - 48px);
 	overflow-y: auto;
 	scrollbar-width: none;
 	box-sizing: border-box;
@@ -92,6 +97,7 @@ let list = null;
 let paintTimer = null;
 let items = [];
 let index = 0;
+let zoom = 1;
 let bounds = { from: 0, to: 0 };
 
 
@@ -210,6 +216,8 @@ function paint()
 		build();
 	}
 
+	list.style.setProperty("--page-zoom", String(zoom));
+
 	let selectedRow = null;
 
 	list.replaceChildren(
@@ -242,6 +250,7 @@ globalThis.mruOverlay = {
 
 		index = message.index;
 		bounds = message.bounds;
+		zoom = message.zoom || 1;
 
 		if (host) {
 			paint();
