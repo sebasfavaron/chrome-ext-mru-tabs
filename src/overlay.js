@@ -49,38 +49,26 @@ const Styles = `
 	border: 1px solid rgba(0, 0, 0, 0.1);
 	box-shadow: 0 18px 48px rgba(0, 0, 0, 0.28);
 }
-.row {
+.query {
 	display: flex;
 	align-items: center;
-	gap: 10px;
-	padding: 7px 10px;
-	min-height: 32px;
-	box-sizing: border-box;
-	border-radius: 9px;
+	gap: 8px;
+	padding: 8px 10px 10px;
+	margin-bottom: 4px;
+	border-bottom: 1px solid rgba(0, 0, 0, 0.1);
+	font-size: 14px;
+	white-space: pre;
 	overflow: hidden;
 }
-.row.on { background: #1a73e8; color: #ffffff; }
-.icon {
-	flex: 0 0 auto;
-	width: 16px;
+.query .typed:empty::before { content: "Type to search"; opacity: 0.45; }
+.query .caret {
+	width: 1px;
 	height: 16px;
-	border-radius: 4px;
-	object-fit: contain;
+	margin-left: -8px;
+	background: currentColor;
+	animation: blink 1s steps(1) infinite;
 }
-.tile {
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	font-size: 10px;
-	font-weight: 600;
-	color: #ffffff;
-	text-transform: uppercase;
-}
-.text { min-width: 0; display: flex; flex-direction: column; }
-.title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.host:empty { display: none; }
-.host { font-size: 11px; opacity: 0.55; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.row.on .host { opacity: 0.8; }
+@keyframes blink { 50% { opacity: 0; } }
 @media (prefers-color-scheme: dark) {
 	.card {
 		background: #26282b;
@@ -88,9 +76,9 @@ const Styles = `
 		border-color: rgba(255, 255, 255, 0.12);
 		box-shadow: 0 18px 48px rgba(0, 0, 0, 0.6);
 	}
-	.row.on { background: #8ab4f8; color: #1a1a1a; }
+	.query { border-color: rgba(255, 255, 255, 0.12); }
 }
-`;
+` + globalThis.mruRows.Styles;
 
 let host = null;
 let list = null;
@@ -98,6 +86,8 @@ let paintTimer = null;
 let items = [];
 let index = 0;
 let zoom = 1;
+	// null while walking; the typed text once the list is being searched
+let query = null;
 let bounds = { from: 0, to: 0 };
 
 
@@ -148,68 +138,6 @@ function build()
 }
 
 
-	// a stable colour per site, so the fallback tile still tells tabs apart
-function tint(
-	text)
-{
-	let hash = 0;
-
-	for (const character of text) {
-		hash = (hash * 31 + character.codePointAt(0)) % 360;
-	}
-
-	return `hsl(${hash}, 52%, 45%)`;
-}
-
-
-function drawRow(
-	item,
-	isSelected)
-{
-	const row = document.createElement("div");
-
-	row.className = isSelected ? "row on" : "row";
-
-	const tile = document.createElement("div");
-
-	tile.className = "icon tile";
-	tile.style.background = tint(item.host || item.title || "?");
-	tile.textContent = (item.host || item.title || "?").charAt(0);
-
-		// the icon is served from the extension's own _favicon/ endpoint, never
-		// from the site.  an <img> here is a fetch by the page's document: a
-		// site's URL as the src would put the hostname of every tab in the list
-		// into that page's service worker, and put a credentialed hit on each
-		// of those sites saying where you were when you switched.  a
-		// chrome-extension: request cannot be intercepted that way.  the tile
-		// needs no resource at all and stands in when even that does not load.
-	if (item.favIconUrl) {
-		const icon = document.createElement("img");
-
-		icon.className = "icon";
-		icon.src = item.favIconUrl;
-		icon.addEventListener("error", () => icon.replaceWith(tile), { once: true });
-		row.append(icon);
-	} else {
-		row.append(tile);
-	}
-
-	const text = document.createElement("div");
-	const title = document.createElement("div");
-	const site = document.createElement("div");
-
-	text.className = "text";
-	title.className = "title";
-	title.textContent = item.title || item.host || "(untitled)";
-	site.className = "host";
-	site.textContent = item.host;
-	text.append(title, site);
-	row.append(text);
-
-	return row;
-}
-
-
 function paint()
 {
 	if (!host) {
@@ -219,19 +147,40 @@ function paint()
 	list.style.setProperty("--page-zoom", String(zoom));
 
 	let selectedRow = null;
+	const { drawRow, drawHeading } = globalThis.mruRows;
+	const rows = items
+		.slice(bounds.from, bounds.to)
+		.map((item, offset) => {
+			if (item.heading) {
+				return drawHeading(item.heading);
+			}
 
-	list.replaceChildren(
-		...items
-			.slice(bounds.from, bounds.to)
-			.map((item, offset) => {
-				const isSelected = bounds.from + offset === index;
-				const row = drawRow(item, isSelected);
+			const isSelected = bounds.from + offset === index;
+			const row = drawRow(item, isSelected);
 
-				selectedRow = isSelected ? row : selectedRow;
+			selectedRow = isSelected ? row : selectedRow;
 
-				return row;
-			})
-	);
+			return row;
+		});
+
+	if (query !== null) {
+		const bar = document.createElement("div");
+		const typed = document.createElement("span");
+		const caret = document.createElement("span");
+
+		bar.className = "query";
+		typed.className = "typed";
+		typed.textContent = query;
+		caret.className = "caret";
+		bar.append(typed, caret);
+		rows.unshift(bar);
+
+		if (!items.length) {
+			rows.push(drawHeading("No matching tabs", "empty"));
+		}
+	}
+
+	list.replaceChildren(...rows);
 
 		// with the card capped to the viewport the highlight can fall outside
 		// it; nothing else scrolls this list
@@ -251,8 +200,12 @@ globalThis.mruOverlay = {
 		index = message.index;
 		bounds = message.bounds;
 		zoom = message.zoom || 1;
+		query = message.query ?? null;
 
-		if (host) {
+			// typing is a decision to read the list, so it draws at once
+		if (host || query !== null) {
+			clearTimeout(paintTimer);
+			paintTimer = null;
 			paint();
 		} else if (!paintTimer) {
 			paintTimer = setTimeout(() => {
@@ -269,6 +222,7 @@ globalThis.mruOverlay = {
 		host?.remove();
 		host = null;
 		list = null;
+		query = null;
 	},
 };
 

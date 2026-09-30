@@ -399,7 +399,7 @@ test("injecting into a tab that already has the script changes nothing", async (
 
 		await Promise.all(tabs.map((tab) => chrome.scripting.executeScript({
 			target: { tabId: tab.id, allFrames: true },
-			files: ["src/overlay.js", "src/content.js"],
+			files: ["src/rows.js", "src/overlay.js", "src/content.js"],
 		}).catch(() => {})));
 	});
 
@@ -414,7 +414,7 @@ test("injecting into a tab that already has the script changes nothing", async (
 
 		await chrome.scripting.executeScript({
 			target: { tabId: tab.id, allFrames: true },
-			files: ["src/overlay.js", "src/content.js"],
+			files: ["src/rows.js", "src/overlay.js", "src/content.js"],
 		}).catch(() => {});
 	});
 
@@ -676,4 +676,350 @@ test("a key event the page made up cannot steer the gesture", async () => {
 	assert.equal(await activeTitle(), "alpha", "a real release still works");
 
 	await Promise.all([alpha.close(), beta.close()]);
+});
+
+
+	// the popup is an ordinary extension page, so a tab can load it directly.
+	// opened that way it is the current tab, and search leaves it out as it
+	// leaves out whichever tab you are on.
+async function openSearch()
+{
+	const id = new URL(worker.url()).host;
+	const page = await context.newPage();
+
+	await page.goto(`chrome-extension://${id}/src/popup.html`);
+	await page.bringToFront();
+	await page.waitForSelector(".row, .empty");
+
+	return page;
+}
+
+
+function searchRows(
+	page)
+{
+	return page.$$eval(".heading, .row", (nodes) => nodes.map((node) => (
+		node.classList.contains("heading")
+			? `# ${node.textContent}`
+			: node.querySelector(".title").textContent
+	)));
+}
+
+
+test("search lists open tabs by recency and recently closed below", async () => {
+	const alpha = await openPage("alpha");
+	const beta = await openPage("beta");
+	const gone = await openPage("search-closed-one");
+
+	await gone.close();
+	await beta.bringToFront();
+	await alpha.bringToFront();
+	await alpha.waitForTimeout(200);
+
+	const search = await openSearch();
+	const rows = await searchRows(search);
+
+	assert.deepEqual(rows.slice(0, 2), ["alpha", "beta"]);
+	assert.ok(rows.indexOf("# Recently closed") > rows.indexOf("beta"));
+	assert.ok(rows.includes("search-closed-one"));
+
+	await Promise.all([alpha.close(), beta.close(), search.close()]);
+});
+
+
+test("typing filters both sections and Enter switches to the best open match", async () => {
+	const alpha = await openPage("search-alpha");
+	const beta = await openPage("search-beta");
+
+	await alpha.bringToFront();
+
+	const search = await openSearch();
+
+	await search.keyboard.type("BETA");
+	await search.waitForTimeout(50);
+
+	const rows = await searchRows(search);
+
+	const closedAt = rows.indexOf("# Recently closed");
+
+		// earlier tests closed tabs called beta, and those match too
+	assert.deepEqual(rows.slice(0, closedAt === -1 ? undefined : closedAt), ["search-beta"]);
+	assert.equal(await search.$eval(".row.on mark", (mark) => mark.textContent), "beta");
+
+	await search.keyboard.press("Enter");
+	await alpha.waitForTimeout(300);
+
+	assert.equal(await activeTitle(), "search-beta");
+
+	await Promise.all([alpha.close(), beta.close(), search.close().catch(() => {})]);
+});
+
+
+test("choosing a recently closed tab restores it", async () => {
+	const keep = await openPage("search-keep");
+	const gone = await openPage("search-restore-me");
+
+	await gone.close();
+	await keep.bringToFront();
+
+	const search = await openSearch();
+
+	await search.keyboard.type("restore-me");
+	await search.waitForTimeout(50);
+
+	assert.deepEqual(await searchRows(search), ["# Recently closed", "search-restore-me"]);
+
+	const restored = context.waitForEvent("page");
+
+	await search.keyboard.press("Enter");
+
+	const page = await restored;
+
+	await page.waitForFunction(() => document.title === "search-restore-me");
+	await page.waitForTimeout(200);
+
+	assert.equal(await activeTitle(), "search-restore-me");
+
+	await Promise.all([keep.close(), page.close(), search.close().catch(() => {})]);
+});
+
+
+test("a tab in a closed window can be restored on its own", async () => {
+	const keep = await openPage("search-stay");
+	const windowId = await worker.evaluate(async (url) => {
+		const created = await chrome.windows.create({
+			url: [`${url}/?name=search-win-a`, `${url}/?name=search-win-b`],
+		});
+
+		return created.id;
+	}, origin);
+
+	await keep.waitForTimeout(800);
+	await worker.evaluate((id) => chrome.windows.remove(id), windowId);
+	await keep.bringToFront();
+
+	const search = await openSearch();
+
+	await search.keyboard.type("search-win-b");
+	await search.waitForTimeout(50);
+
+	assert.deepEqual(await searchRows(search), ["# Recently closed", "search-win-b"]);
+
+	const restored = context.waitForEvent("page");
+
+	await search.keyboard.press("Enter");
+
+	const page = await restored;
+
+	await page.waitForFunction(() => document.title === "search-win-b");
+
+	const titles = await worker.evaluate(async () => (await chrome.tabs.query({})).map((tab) => tab.title));
+
+	assert.ok(!titles.includes("search-win-a"), "only the chosen tab comes back");
+
+	await Promise.all([keep.close(), page.close(), search.close().catch(() => {})]);
+});
+
+
+test("what you type in search never reaches the page underneath", async () => {
+	const page = await openPage("search-watched");
+
+	await page.evaluate(() => {
+		window.seen = [];
+		window.addEventListener("keydown", (event) => window.seen.push(event.key), true);
+	});
+
+	const search = await openSearch();
+
+	await search.keyboard.type("secret");
+
+	assert.deepEqual(await page.evaluate(() => window.seen), []);
+
+	await Promise.all([page.close(), search.close()]);
+});
+
+
+
+	// the list is in a closed shadow root, so what it shows is read from the
+	// worker's own record of the search
+function searchState()
+{
+	return worker.evaluate(() => globalThis.mruSearchState?.());
+}
+
+
+async function typeInList(
+	page,
+	text)
+{
+		// the page learns a list is up one message after the command, and a
+		// key pressed before then is still the page's
+	await page.waitForTimeout(100);
+
+	for (const key of text) {
+		await page.keyboard.press(key);
+	}
+
+	await page.waitForTimeout(150);
+}
+
+
+test("typing while the list is up searches it, and letting go keeps it open", async () => {
+	const alpha = await openPage("list-alpha");
+	const beta = await openPage("list-beta");
+	const gamma = await openPage("list-gamma");
+
+	await gamma.keyboard.down("Control");
+	await gesture(Forward);
+	await gamma.waitForTimeout(300);
+	await typeInList(gamma, "alp");
+	await gamma.keyboard.up("Control");
+	await gamma.waitForTimeout(300);
+
+	assert.equal(await overlayShowing(gamma), true, "the release did not end it");
+	assert.equal(await activeTitle(), "list-gamma");
+
+	const state = await searchState();
+
+	assert.equal(state.query, "alp");
+	assert.equal(state.selected, "list-alpha");
+
+	await gamma.keyboard.press("Enter");
+	await gamma.waitForTimeout(300);
+
+	assert.equal(await activeTitle(), "list-alpha");
+	assert.equal(await overlayShowing(gamma), false);
+
+	await Promise.all([alpha.close(), beta.close(), gamma.close()]);
+});
+
+
+test("backspace edits the query and the arrows move through the matches", async () => {
+	const one = await openPage("list-note-one");
+	const two = await openPage("list-note-two");
+	const here = await openPage("list-here");
+
+	await here.keyboard.down("Control");
+	await gesture(Forward);
+	await typeInList(here, "list-notx");
+	await here.keyboard.up("Control");
+
+	assert.equal((await searchState()).selected, null, "nothing matches yet");
+
+	await here.keyboard.press("Backspace");
+	await here.waitForTimeout(150);
+
+	let state = await searchState();
+
+	assert.equal(state.query, "list-not");
+	assert.equal(state.selected, "list-note-two", "the more recent match first");
+
+	await here.keyboard.press("ArrowDown");
+	await here.waitForTimeout(150);
+	state = await searchState();
+	assert.equal(state.selected, "list-note-one");
+
+	await here.keyboard.press("Enter");
+	await here.waitForTimeout(300);
+
+	assert.equal(await activeTitle(), "list-note-one");
+
+	await Promise.all([one.close(), two.close(), here.close()]);
+});
+
+
+test("the list's search reaches recently closed tabs and reopens them", async () => {
+	const keep = await openPage("list-keep");
+	const other = await openPage("list-other");
+	const gone = await openPage("list-reopen-me");
+
+	await gone.close();
+	await keep.bringToFront();
+	await keep.waitForTimeout(200);
+
+	await keep.keyboard.down("Control");
+	await gesture(Forward);
+	await typeInList(keep, "reopen");
+	await keep.keyboard.up("Control");
+
+	assert.equal((await searchState()).selected, "list-reopen-me");
+
+	const restored = context.waitForEvent("page");
+
+	await keep.keyboard.press("Enter");
+
+	const page = await restored;
+
+	await page.waitForFunction(() => document.title === "list-reopen-me");
+	await page.waitForTimeout(200);
+
+	assert.equal(await activeTitle(), "list-reopen-me");
+
+	await Promise.all([keep.close(), other.close(), page.close()]);
+});
+
+
+test("escape ends a search where you were", async () => {
+	const alpha = await openPage("list-stay-a");
+	const beta = await openPage("list-stay-b");
+
+	await beta.keyboard.down("Control");
+	await gesture(Forward);
+	await typeInList(beta, "stay");
+	await beta.keyboard.up("Control");
+	await beta.keyboard.press("Escape");
+	await beta.waitForTimeout(300);
+
+	assert.equal(await overlayShowing(beta), false);
+	assert.equal(await activeTitle(), "list-stay-b");
+
+	await Promise.all([alpha.close(), beta.close()]);
+});
+
+
+test("what you type into the list never reaches the page", async () => {
+	const alpha = await openPage("list-private-a");
+	const page = await openPage("list-private-b");
+
+		// a page listening every way it can, with a field focused to type into
+	await page.evaluate(() => {
+		window.seen = [];
+
+		const field = document.createElement("input");
+
+		document.body.append(field);
+		field.focus();
+
+		const log = (where) => (event) => window.seen.push(`${where}:${event.type}:${event.key ?? event.data}`);
+
+		for (const type of ["keydown", "keypress", "keyup", "beforeinput", "input"]) {
+			window.addEventListener(type, log("window-capture"), true);
+			window.addEventListener(type, log("window"));
+			document.addEventListener(type, log("document"), true);
+			field.addEventListener(type, log("field"));
+		}
+	});
+
+	await page.keyboard.down("Control");
+	await gesture(Forward);
+	await page.waitForTimeout(250);
+	await typeInList(page, "secret");
+	await page.keyboard.up("Control");
+	await typeInList(page, "more");
+	await page.keyboard.press("Backspace");
+	await page.keyboard.press("ArrowDown");
+	await page.keyboard.press("Escape");
+	await page.waitForTimeout(300);
+
+	const { seen, value } = await page.evaluate(() => ({
+		seen: window.seen,
+		value: document.querySelector("input").value,
+	}));
+
+		// the Control press that started the walk is the page's own business:
+		// it happened before there was a list to type into
+	assert.deepEqual(seen.filter((entry) => !entry.endsWith(":Control")), []);
+	assert.equal(value, "");
+
+	await Promise.all([alpha.close(), page.close()]);
 });

@@ -7,13 +7,15 @@ import {
 	rowWindow,
 	settleDelay,
 	MAX_HOLD_MS,
+	SEARCH_IDLE_MS,
 	OVERLAY_DELAY_MS,
 	MAX_ROWS,
 } from "./session.js";
+import { rowsFor, move } from "./search.js";
 
 	// the overlay only ever draws in the top frame, so loading it into every
 	// subframe costs six kilobytes a frame for nothing
-const TopFrameScripts = ["src/overlay.js"];
+const TopFrameScripts = ["src/rows.js", "src/overlay.js"];
 const EveryFrameScripts = ["src/content.js"];
 
 const OrderKey = "order";
@@ -79,30 +81,33 @@ function save()
 }
 
 
+	// what a row shows for one tab, open or closed
+function describe(
+	tab)
+{
+	return {
+		title: tab?.title || tab?.url || "",
+		host: hostOf(tab?.url ?? ""),
+			// the extension's own favicon endpoint, never the site's URL: an
+			// <img> in the page's document is a fetch by that page, and the
+			// site's URL there would hand the page a list of where the user
+			// has tabs open
+		favIconUrl: tab?.url
+			? chrome.runtime.getURL(
+				`/_favicon/?pageUrl=${encodeURIComponent(tab.url)}&size=32`
+			)
+			: "",
+	};
+}
+
+
 function itemsFor(
 	ids,
 	tabs)
 {
 	const byId = new Map(tabs.map((tab) => [tab.id, tab]));
 
-	return ids.map((id) => {
-		const tab = byId.get(id);
-
-		return {
-			id,
-			title: tab?.title || tab?.url || "",
-			host: hostOf(tab?.url ?? ""),
-				// the extension's own favicon endpoint, never the site's URL:
-				// an <img> in the page's document is a fetch by that page, and
-				// the site's URL there would hand the page a list of where the
-				// user has tabs open
-			favIconUrl: tab?.url
-				? chrome.runtime.getURL(
-					`/_favicon/?pageUrl=${encodeURIComponent(tab.url)}&size=32`
-				)
-				: "",
-		};
-	});
+	return ids.map((id) => ({ id, ...describe(byId.get(id)) }));
 }
 
 
@@ -136,7 +141,8 @@ async function show(
 			bounds: rowWindow(index, length, MAX_ROWS),
 			delay: OVERLAY_DELAY_MS,
 			zoom,
-			maxHold: MAX_HOLD_MS,
+			maxHold: gesture?.search ? SEARCH_IDLE_MS : MAX_HOLD_MS,
+			query: gesture?.search?.query,
 		});
 
 		if (gesture) {
@@ -258,6 +264,10 @@ async function begin(
 async function advance(
 	direction)
 {
+	if (gesture.search) {
+		return moveSearch(direction);
+	}
+
 	gesture.session = step(gesture.session, direction);
 	gesture.taps += 1;
 
@@ -287,6 +297,107 @@ async function advance(
 	}
 
 	armTimers();
+}
+
+
+	// the rows a search draws: the walk's own list minus the tab you are on,
+	// then the recently closed
+function refresh()
+{
+	const { search } = gesture;
+	const { rows, index } = rowsFor(search.query, search.open, search.closed);
+
+	search.rows = rows;
+	search.index = index;
+}
+
+
+function showSearch()
+{
+	const { rows, index } = gesture.search;
+
+		// the list changes with every key, so it travels every time
+	gesture.itemsSentTo = null;
+
+	return show(gesture.hostTabId, rows, index, rows.length);
+}
+
+
+	// the idle ceiling replaces the hold one: a search ends on Enter, Escape
+	// or leaving Chrome, and this only catches one that was walked away from
+function armSearchTimer()
+{
+	const { id } = gesture;
+
+	clearTimeout(gesture.settleTimer);
+	clearTimeout(gesture.maxTimer);
+	gesture.settleTimer = null;
+	gesture.maxTimer = setTimeout(() => run(() => gesture?.id === id && cancel()), SEARCH_IDLE_MS);
+}
+
+
+async function type(
+	key)
+{
+		// with no list on screen there is nothing to type into
+	if (!gesture || gesture.mode === "blind") {
+		return;
+	}
+
+	if (!gesture.search) {
+		gesture.search = {
+			query: "",
+			open: gesture.items.slice(1),
+			closed: await closedItems(),
+			rows: [],
+			index: -1,
+		};
+	}
+
+	const { search } = gesture;
+
+	search.query = key === "Backspace" ? search.query.slice(0, -1) : search.query + key;
+	refresh();
+	armSearchTimer();
+	await showSearch();
+}
+
+
+async function moveSearch(
+	direction)
+{
+	const { search } = gesture;
+
+	if (search.index !== -1) {
+		search.index = move(search.rows, search.index, direction);
+	}
+
+	armSearchTimer();
+	await showSearch();
+}
+
+
+async function finishSearch()
+{
+	const { search } = gesture;
+	const row = search.rows[search.index];
+
+	clearTimers();
+	hide(gesture.hostTabId);
+	gesture = null;
+
+	if (!row) {
+		return;
+	}
+
+	if (row.sessionId) {
+			// the restored tab reaches the recency order through its own
+			// creation and activation
+		await openResult({ sessionId: row.sessionId });
+	} else if (await activate(row.id)) {
+		order = touch(order, row.id);
+		save();
+	}
 }
 
 
@@ -338,7 +449,7 @@ function commit(
 		return undefined;
 	}
 
-	return finish(gesture.session);
+	return gesture.search ? finishSearch() : finish(gesture.session);
 }
 
 
@@ -359,6 +470,61 @@ function run(
 }
 
 
+	// what Chrome remembers closing, newest first as Chrome returns it.  a
+	// closed window or group is flattened into its tabs, each restorable on
+	// its own.
+async function closedItems()
+{
+	const sessions = await chrome.sessions.getRecentlyClosed().catch(() => []);
+
+	return sessions.flatMap((session) => {
+		const inner = session.tab
+			? [session.tab]
+			: (session.window ?? session.group)?.tabs ?? [];
+
+		return inner
+			.filter((tab) => tab.sessionId && tab.url)
+			.map((tab) => ({
+				sessionId: tab.sessionId,
+				...describe(tab),
+				closedAt: session.lastModified * 1000,
+			}));
+	});
+}
+
+
+	// what the search popup lists: every open tab but the one you are on, in
+	// the recency order, and the recently closed ones
+async function searchable()
+{
+	const { order: live, tabs } = await liveOrder();
+	const current = await activeTabId();
+
+	return {
+		open: itemsFor(live.filter((id) => id !== current), tabs),
+		closed: await closedItems(),
+	};
+}
+
+
+async function openResult(
+	{ tabId, sessionId })
+{
+	if (tabId != null) {
+		return activate(tabId);
+	}
+
+	try {
+		await chrome.sessions.restore(sessionId);
+
+		return true;
+	} catch {
+			// gone from Chrome's list since the popup read it
+		return false;
+	}
+}
+
+
 chrome.commands.onCommand.addListener((name) => {
 	const direction = name === "step-backward" ? -1 : 1;
 
@@ -371,8 +537,10 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 		case "ctrl":
 			ctrlDown = message.down;
 
+				// once typing has started, letting go of Control is how you
+				// type the rest; Enter is what chooses
 			if (!message.down) {
-				run(() => commit());
+				run(() => (gesture?.search ? undefined : commit()));
 			}
 
 			break;
@@ -385,7 +553,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 			// happened somewhere we cannot see.
 		case "blur":
 			ctrlDown = false;
-			run(() => commit());
+				// a search you walked away from was not a choice
+			run(() => (gesture?.search ? cancel() : commit()));
+			break;
+
+		case "type":
+			run(() => type(message.key));
+			break;
+
+		case "move":
+			run(() => gesture?.search && moveSearch(message.direction));
 			break;
 
 		case "commit":
@@ -395,6 +572,18 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 		case "cancel":
 			run(() => cancel());
 			break;
+
+			// the popup waits on both: it closes once the switch is done, and
+			// closing first would take the request with it
+		case "search":
+			searchable().then(respond, () => respond({ open: [], closed: [] }));
+
+			return true;
+
+		case "open":
+			openResult(message).then((ok) => respond({ ok }), () => respond({ ok: false }));
+
+			return true;
 	}
 
 	respond({ ok: true });
@@ -484,3 +673,14 @@ async function injectEverywhere()
 
 chrome.runtime.onInstalled.addListener(() => injectEverywhere());
 chrome.runtime.onStartup.addListener(() => injectEverywhere());
+
+
+	// the list is drawn in a closed shadow root that nothing can read back, so
+	// the end-to-end suite asks the worker what a search is showing
+globalThis.mruSearchState = () => {
+	const search = gesture?.search;
+
+	return search
+		? { query: search.query, selected: search.rows[search.index]?.title ?? null }
+		: null;
+};
