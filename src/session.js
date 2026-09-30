@@ -15,6 +15,10 @@ export const SETTLE_READING_MS = 1200;
 	// absolute ceiling on one gesture, so nothing can stay stuck
 export const MAX_HOLD_MS = 10000;
 
+	// a search is typed rather than held, so it gets its own ceiling, counted
+	// from the last key rather than from the start
+export const SEARCH_IDLE_MS = 30000;
+
 export const MAX_ROWS = 12;
 
 

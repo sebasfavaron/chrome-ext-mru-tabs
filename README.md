@@ -44,6 +44,31 @@ it comes out above a modal dialog or a fullscreen video — the right-hand shot 
 Google Meet's own permission prompt, which sits in that layer and hides anything
 stacked normally.
 
+## Search, including what you closed
+
+With the list up, keep holding `Ctrl` and type. The list turns into a search
+over your other tabs, in the order you used them, and below them the tabs
+Chrome remembers closing — a closed window's tabs come back one at a time.
+From the first letter on, letting go of `Ctrl` no longer switches: type the
+rest freely, arrows or `Ctrl+Tab` to move, `Enter` to switch or reopen,
+`Escape` to stay where you were.
+
+```text
+Ctrl held ─ Tab ─ p l a n ─ release Ctrl ─ n e r ─ Enter
+            list   search     still open    query    lands
+```
+
+Matching is the one Chrome's own tab search uses: exact, ignoring case and
+accents, with a match at the start of a title or host first, then one at the
+start of a word, then anywhere. The title counts double the host.
+
+Typing with `Ctrl` held works on macOS, where `Ctrl+letter` is not a browser
+shortcut. Elsewhere most of those combinations belong to Chrome.
+
+Where the list cannot draw — the new tab page, `chrome://` pages — the
+toolbar button opens the same search in a popup. It has no shortcut until you
+give it one in `chrome://extensions/shortcuts`.
+
 ## It cannot get stuck
 
 Switchers like this usually open a small window and read the keyboard from
@@ -80,22 +105,30 @@ does not do matters more than the feature list.
   requests of its own at all.
 - **It never stores your browsing.** The recency order is tab ids in memory,
   mirrored to `chrome.storage.session`, which Chrome clears when it quits.
-  Nothing reaches disk.
+  Nothing reaches disk. Recently closed tabs are read from Chrome's own list
+  each time search opens, never copied.
 - **The page cannot read your tabs.** The list is drawn into a closed shadow
   root, and icons come from Chrome's own favicon store over an extension URL, so
   the page never sees a request revealing where else you have tabs open.
+- **The page cannot read your search.** From the first letter until the list
+  closes, every key stops at the extension's listener, which runs before any
+  the page registers, and is kept from whatever field has focus. The one
+  exception is a tab that was already open when the extension was installed
+  or reloaded: there the page's listeners came first. Reload the tab to fix it.
 - **The page cannot drive it.** Key events that a page invents are rejected, so
   a site cannot hold the modifier down for you or pick where you land.
 
 Two things a page can still tell, because the list is drawn in its document:
-that the extension is installed, and the moment of each switch.
+that the extension is installed, and the moment of each switch. While you
+search it can also tell that keys are being pressed, from the events that
+stop reaching it, but not which ones.
 
 ## Install
 
 Not on the Web Store — load it unpacked.
 
 1. `chrome://extensions` → Developer mode on → **Load unpacked** → this folder.
-2. `chrome://extensions/shortcuts` → check the two commands. macOS comes bound
+2. `chrome://extensions/shortcuts` → check the commands. macOS comes bound
    to `Ctrl+Q` and `Ctrl+Shift+Q`; elsewhere the defaults are `Alt+Q` and
    `Alt+Shift+Q`, because Chrome will not take `Ctrl+Q` there.
 
@@ -131,10 +164,13 @@ src/
 ├── session.js    # one gesture's state machine, pure
 ├── sw.js         # Chrome events, tab activation, message routing
 ├── content.js    # keyboard capture, in every frame
-└── overlay.js    # draws the list, top frame only
+├── overlay.js    # draws the list, top frame only
+├── rows.js       # one row of a list, shared by the overlay and the popup
+├── search.js     # Chrome's tab search matching, pure
+└── popup.js      # the toolbar search, for pages the list cannot draw on
 ```
 
-`mru.js` and `session.js` hold every decision worth testing and name no browser
+`mru.js`, `session.js` and `search.js` hold every decision worth testing and name no browser
 API, so they run under `node --test` with no Chrome at all.
 
 ## Tests
@@ -152,7 +188,10 @@ step, a page that calls `stopImmediatePropagation` on every keyboard listener it
 can register, a page serving a `strict-dynamic` CSP, a page holding the top layer
 with a modal dialog, a page inventing key events to steer the gesture, a page
 watching for icon fetches to learn where else you have tabs open, a tab that
-closes mid-gesture, and a blind step from `chrome://version`.
+closes mid-gesture, a blind step from `chrome://version`, and search, in the
+list and in the popup: typing past the release, editing and moving, reopening
+a closed tab and one tab of a closed window, and a page with a focused field
+listening every way it can for what you type.
 
 Chrome 152 and later ignore `--load-extension`, which is why the suite runs in
 Playwright's bundled Chromium rather than your installed Chrome.

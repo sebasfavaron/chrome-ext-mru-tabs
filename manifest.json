@@ -2,17 +2,22 @@
 	"manifest_version": 3,
 	"name": "MRU Tabs",
 	"version": "1.0.0",
-	"description": "Ctrl+Tab walks a recency-ordered tab list and lands when you let go.",
+	"description": "Ctrl+Tab walks a recency-ordered tab list and lands when you let go. Search covers open and recently closed tabs.",
 	"minimum_chrome_version": "121",
 	"permissions": [
 		"tabs",
 		"storage",
 		"scripting",
-		"favicon"
+		"favicon",
+		"sessions"
 	],
 	"host_permissions": [
 		"<all_urls>"
 	],
+	"action": {
+		"default_title": "Search tabs",
+		"default_popup": "src/popup.html"
+	},
 	"background": {
 		"service_worker": "src/sw.js",
 		"type": "module"
@@ -25,6 +30,7 @@
 			"all_frames": false,
 			"run_at": "document_start",
 			"js": [
+				"src/rows.js",
 				"src/overlay.js"
 			]
 		},
@@ -41,6 +47,9 @@
 		}
 	],
 	"commands": {
+		"_execute_action": {
+			"description": "Search open and recently closed tabs"
+		},
 		"step-forward": {
 			"suggested_key": {
 				"default": "Alt+Q",

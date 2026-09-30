@@ -23,6 +23,17 @@ const isTop = window.top === window;
 
 let sessionOn = false;
 
+	// set once a key typed into the list turns the walk into a search.  from
+	// then until the list closes every key stops here: this listener is the
+	// first the page's keyboard reaches, and stopImmediatePropagation keeps
+	// the rest of the page -- its own listeners and whatever field has focus --
+	// from seeing what you type.
+let searching = false;
+
+	// keys whose press was kept from the page, so that their release is too,
+	// even when it lands after the list has closed
+const held = new Set();
+
 	// the worker can be evicted mid-gesture, taking the hide message with it.
 	// the overlay removes itself rather than being left painted over the page.
 let orphanTimer = null;
@@ -47,6 +58,28 @@ function send(
 }
 
 
+function swallow(
+	event)
+{
+	event.preventDefault();
+	event.stopImmediatePropagation();
+	held.add(event.code);
+}
+
+
+	// a character, not a shortcut.  Control is allowed because it is the key
+	// being held: on macOS Ctrl+letter is not a browser shortcut, so typing
+	// with it still down is what starts a search.
+function typable(
+	event)
+{
+	return event.key.length === 1 && !event.metaKey && !event.altKey;
+}
+
+
+const Moves = { ArrowDown: 1, ArrowUp: -1 };
+
+
 window.addEventListener("keydown", (event) => {
 		// a page can dispatch a KeyboardEvent that is indistinguishable from a
 		// real one.  without this, any site could hold the modifier down on our
@@ -59,17 +92,54 @@ window.addEventListener("keydown", (event) => {
 		// a held modifier does not auto-repeat on macOS but does elsewhere
 	if (event.key === "Control" && !event.repeat) {
 		send({ type: "ctrl", down: true });
-	} else if (sessionOn && event.key === "Escape") {
-		event.preventDefault();
-		event.stopPropagation();
+	}
+
+	if (!sessionOn) {
+		return;
+	}
+
+	if (event.key === "Escape") {
+		swallow(event);
 		send({ type: "cancel" });
+	} else if (typable(event)) {
+		swallow(event);
+		send({ type: "type", key: event.key });
+	} else if (searching) {
+		swallow(event);
+
+		if (event.key === "Backspace") {
+			send({ type: "type", key: "Backspace" });
+		} else if (event.key in Moves) {
+			send({ type: "move", direction: Moves[event.key] });
+		} else if (event.key === "Enter") {
+			send({ type: "commit" });
+		}
+	}
+}, Capture);
+
+
+	// a key whose default was prevented fires no keypress, but a page listening
+	// for one must not learn otherwise
+window.addEventListener("keypress", (event) => {
+	if (event.isTrusted && searching) {
+		event.preventDefault();
+		event.stopImmediatePropagation();
 	}
 }, Capture);
 
 
 window.addEventListener("keyup", (event) => {
-	if (event.isTrusted && event.key === "Control") {
+	if (!event.isTrusted) {
+		return;
+	}
+
+	if (event.key === "Control") {
 		send({ type: "ctrl", down: false });
+	}
+
+	if (held.delete(event.code) || searching) {
+		event.preventDefault();
+		event.stopImmediatePropagation();
 	}
 }, Capture);
 
@@ -98,6 +168,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 	}
 
 	sessionOn = message.on;
+	searching = message.on && typeof message.query === "string";
 
 	clearTimeout(orphanTimer);
 	orphanTimer = message.on
