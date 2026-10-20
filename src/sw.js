@@ -276,11 +276,30 @@ async function activate(
 }
 
 
-async function activeTabId()
+async function activeTab()
 {
 	const [tab] = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
 
-	return tab?.id ?? null;
+	return tab ?? null;
+}
+
+
+async function activeTabId()
+{
+	return (await activeTab())?.id ?? null;
+}
+
+
+	// a private window lists only private tabs and an ordinary one only
+	// ordinary tabs, so neither shows the other's titles
+function sameKind(
+	ids,
+	tabs,
+	incognito)
+{
+	const kind = new Map(tabs.map((tab) => [tab.id, tab.incognito]));
+
+	return ids.filter((id) => kind.get(id) === incognito);
 }
 
 
@@ -329,11 +348,12 @@ async function begin(
 		// the tab list, the active tab and its zoom are independent reads, so
 		// they travel together: the list leaves after the slowest of them, not
 		// after the sum
-	const [{ order: live, tabs }, [hostTabId, zoom]] = await Promise.all([
+	const [{ order: live, tabs }, [host, zoom]] = await Promise.all([
 		liveOrder(),
-		activeTabId().then(async (id) => [id, id == null ? 1 : await chrome.tabs.getZoom(id).catch(() => 1)]),
+		activeTab().then(async (tab) => [tab, tab == null ? 1 : await chrome.tabs.getZoom(tab.id).catch(() => 1)]),
 	]);
-	const session = start(live, direction);
+	const hostTabId = host?.id ?? null;
+	const session = start(sameKind(live, tabs, Boolean(host?.incognito)), direction);
 
 	if (!session) {
 		return;
@@ -610,12 +630,14 @@ async function closedItems()
 	// the recency order, and the recently closed ones
 async function searchable()
 {
-	const { order: live, tabs } = await liveOrder();
-	const current = await activeTabId();
+	const [{ order: live, tabs }, current] = await Promise.all([liveOrder(), activeTab()]);
+	const incognito = Boolean(current?.incognito);
 
+		// Chrome's recently-closed list is the ordinary profile's, so a
+		// private window leaves it out
 	return {
-		open: itemsFor(live.filter((id) => id !== current), tabs),
-		closed: await closedItems(),
+		open: itemsFor(sameKind(live, tabs, incognito).filter((id) => id !== current?.id), tabs),
+		closed: incognito ? [] : await closedItems(),
 	};
 }
 

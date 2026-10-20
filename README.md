@@ -121,8 +121,10 @@ does not do matters more than the feature list.
   the page registers, and is kept from whatever field has focus. The one
   exception is a tab that was already open when the extension was installed
   or reloaded: there the page's listeners came first. Reload the tab to fix it.
-- **It never runs in incognito.** The extension is not allowed there, so a
-  private window's titles never show up in an ordinary window's list.
+- **Private and ordinary windows keep to their own tabs.** With "Allow in
+  Incognito" on, Ctrl+Tab in a private window walks only private tabs, and an
+  ordinary window never lists a private tab's title. Search in a private
+  window leaves out recently closed tabs, which are the ordinary profile's.
 - **The page cannot drive it.** Key events that a page invents are rejected, so
   a site cannot hold the modifier down for you or pick where you land.
 

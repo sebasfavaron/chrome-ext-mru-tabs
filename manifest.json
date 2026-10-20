@@ -4,7 +4,6 @@
 	"version": "1.0.0",
 	"description": "Ctrl+Tab walks a recency-ordered tab list and lands when you let go. Search covers open and recently closed tabs.",
 	"minimum_chrome_version": "121",
-	"incognito": "not_allowed",
 	"permissions": [
 		"tabs",
 		"storage",
