@@ -92,6 +92,12 @@ The modifier cannot be read when your keyboard focus sits somewhere no extension
 can follow — DevTools is the one you will actually meet. Switching still works
 there; a timer rather than your thumb decides when.
 
+A release that lands where no page hears it — the omnibox, the new tab page,
+DevTools, a tab that reloaded under your finger — is not left to stall the next
+gesture: a press only counts for the tab that saw it, and a page that loses
+focus with `Ctrl` down says so. The next gesture then settles at 250 ms instead
+of waiting out the ceiling.
+
 On pages Chrome forbids extensions from touching at all — `chrome://`, the Web
 Store, the PDF viewer, the new tab page — each tap switches immediately with no
 list. Land somewhere ordinary and the list picks up from the next tap.
@@ -115,6 +121,8 @@ does not do matters more than the feature list.
   the page registers, and is kept from whatever field has focus. The one
   exception is a tab that was already open when the extension was installed
   or reloaded: there the page's listeners came first. Reload the tab to fix it.
+- **It never runs in incognito.** The extension is not allowed there, so a
+  private window's titles never show up in an ordinary window's list.
 - **The page cannot drive it.** Key events that a page invents are rejected, so
   a site cannot hold the modifier down for you or pick where you land.
 
@@ -192,6 +200,9 @@ closes mid-gesture, a blind step from `chrome://version`, and search, in the
 list and in the popup: typing past the release, editing and moving, reopening
 a closed tab and one tab of a closed window, and a page with a focused field
 listening every way it can for what you type.
+
+`node tools/bench-begin.mjs` times a gesture from the command to the list
+leaving the worker, with 200 tabs open, idle and while a 40-tab window closes.
 
 Chrome 152 and later ignore `--load-extension`, which is why the suite runs in
 Playwright's bundled Chromium rather than your installed Chrome.

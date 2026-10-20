@@ -29,7 +29,12 @@ let order = null;
 	// deaf, so stepping cannot rewrite the list it is walking.
 let gesture = null;
 
-let ctrlDown = false;
+	// Control as the pages last reported it, and which tab reported it.  a
+	// release can land where no content script hears it -- the omnibox, the
+	// new tab page, DevTools -- so the flag is only believed for the tab that
+	// saw the press: a stale one there would make the next gesture wait out
+	// the ten second ceiling for a release that already happened.
+let ctrl = { down: false, tabId: null };
 
 	// every gesture carries an id.  a timer that has already fired cannot be
 	// un-fired, so a watchdog armed for one gesture must not be allowed to end
@@ -52,32 +57,98 @@ function hostOf(
 }
 
 
-async function liveOrder()
-{
-	const tabs = await chrome.tabs.query({});
-	const ids = tabs.map((tab) => tab.id);
+	// a cold start -- the worker was evicted, or this is its first run --
+	// rebuilds the order from storage and trues it up against Chrome once.
+	// after that every tab event is applied to the order in memory: a query
+	// of every tab per event put forty queries ahead of the Ctrl+Tab that
+	// followed closing a forty-tab window.
+let loading = null;
 
-	if (!order) {
-		const stored = (await chrome.storage.session.get(OrderKey))[OrderKey];
+function loadOrder()
+{
+	loading ??= (async () => {
+		const [tabs, stored] = await Promise.all([
+			chrome.tabs.query({}),
+			chrome.storage.session.get(OrderKey).then((got) => got[OrderKey], () => null),
+		]);
 
 			// lastAccessed gives real recency for tabs this worker never saw,
 			// which is what a cold start is made of
-		order = stored
-			|| [...tabs]
-				.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
-				.map((tab) => tab.id);
+		const loaded = reconcile(
+			stored
+				|| [...tabs]
+					.sort((a, b) => (b.lastAccessed ?? 0) - (a.lastAccessed ?? 0))
+					.map((tab) => tab.id),
+			tabs.map((tab) => tab.id)
+		);
+
+			// set last, with nothing awaited after: the events chained on this
+			// load then run before any event that sees the order already there
+		order = loaded;
+		save();
+
+		return order;
+	})().catch((error) => {
+			// the next event or gesture tries again
+		loading = null;
+
+		throw error;
+	});
+
+	return loading;
+}
+
+
+	// one tab event.  a warm order changes on the spot, outside the queue, so
+	// a burst of events never stands between a gesture and its list.
+let pending = null;
+
+function apply(
+	change)
+{
+	if (order) {
+		order = change(order);
+		save();
+
+		return;
 	}
 
-	order = reconcile(order, ids);
-	save();
+	pending = (pending ?? loadOrder()).then(() => {
+		order = change(order);
+		save();
+	}).catch((error) => console.error("mru-tabs:", error));
+}
+
+
+	// the order and every tab, for a gesture or a search.  the tabs are needed
+	// for the titles anyway, so trueing the order up against them is free.
+async function liveOrder()
+{
+	const [tabs] = await Promise.all([chrome.tabs.query({}), order ?? loadOrder()]);
+	const trued = reconcile(order, tabs.map((tab) => tab.id));
+
+	if (trued.length !== order.length || trued.some((id, at) => id !== order[at])) {
+		order = trued;
+		save();
+	}
 
 	return { order, tabs };
 }
 
 
+	// closing a window is one event per tab, so the mirror is written at most
+	// once per beat rather than once per event.  the worker's idle timeout is
+	// thirty seconds, so the last write always lands before it can be evicted.
+const SaveDelayMs = 250;
+
+let saveTimer = null;
+
 function save()
 {
-	chrome.storage.session.set({ [OrderKey]: order }).catch(() => {});
+	saveTimer ??= setTimeout(() => {
+		saveTimer = null;
+		chrome.storage.session.set({ [OrderKey]: order }).catch(() => {});
+	}, SaveDelayMs);
 }
 
 
@@ -111,6 +182,26 @@ function itemsFor(
 }
 
 
+	// a gesture's zoom is read once per tab it draws in, not on every step:
+	// nothing changes a tab's zoom while you are holding Control over it
+function zoomOf(
+	tabId)
+{
+	if (gesture?.zoom?.tabId !== tabId) {
+		const read = chrome.tabs.getZoom(tabId).catch(() => 1);
+
+		if (!gesture) {
+			return read;
+		}
+
+		gesture.zoom = { tabId, read };
+	}
+
+	return gesture.zoom.read;
+}
+
+
+	// resolves to null when the page has no content script to draw the list
 async function show(
 	tabId,
 	items,
@@ -118,16 +209,16 @@ async function show(
 	length)
 {
 	if (tabId == null) {
-		return false;
+		return null;
 	}
 
 	try {
 			// the card is drawn at the screen's scale, not the page's: without
 			// this a tab at 175% shows a list that runs off both edges and one
 			// at 50% shows one too small to read
-		const zoom = await chrome.tabs.getZoom(tabId).catch(() => 1);
+		const zoom = await zoomOf(tabId);
 
-		await chrome.tabs.sendMessage(tabId, {
+		const reply = await chrome.tabs.sendMessage(tabId, {
 			type: "session",
 			on: true,
 				// the list is sent once per tab that draws it, not on every
@@ -149,11 +240,11 @@ async function show(
 			gesture.itemsSentTo = tabId;
 		}
 
-		return true;
+		return reply ?? {};
 	} catch {
 			// no content script here: a chrome:// page, the Web Store, the PDF
 			// viewer or the new tab page
-		return false;
+		return null;
 	}
 }
 
@@ -193,6 +284,15 @@ async function activeTabId()
 }
 
 
+	// whether Control is down on the tab drawing the list.  a press another
+	// tab reported says nothing about this one.
+function heldOn(
+	tabId)
+{
+	return ctrl.down && ctrl.tabId === tabId;
+}
+
+
 function clearTimers()
 {
 	clearTimeout(gesture?.settleTimer);
@@ -226,7 +326,13 @@ function armTimers()
 async function begin(
 	direction)
 {
-	const { order: live, tabs } = await liveOrder();
+		// the tab list, the active tab and its zoom are independent reads, so
+		// they travel together: the list leaves after the slowest of them, not
+		// after the sum
+	const [{ order: live, tabs }, [hostTabId, zoom]] = await Promise.all([
+		liveOrder(),
+		activeTabId().then(async (id) => [id, id == null ? 1 : await chrome.tabs.getZoom(id).catch(() => 1)]),
+	]);
 	const session = start(live, direction);
 
 	if (!session) {
@@ -237,7 +343,8 @@ async function begin(
 		id: (epoch += 1),
 		session,
 		items: itemsFor(session.order, tabs),
-		hostTabId: await activeTabId(),
+		hostTabId,
+		zoom: { tabId: hostTabId, read: zoom },
 		mode: "blind",
 		taps: 1,
 		settleTimer: null,
@@ -251,7 +358,10 @@ async function begin(
 		session.order.length
 	);
 
-	gesture.mode = commitPolicy({ hasContentScript: shown, ctrlDown });
+	gesture.mode = commitPolicy({
+		hasContentScript: Boolean(shown),
+		ctrlDown: heldOn(gesture.hostTabId),
+	});
 
 	if (gesture.mode === "blind") {
 		await activate(selected(session));
@@ -293,7 +403,10 @@ async function advance(
 	if (gesture.mode === "blind" && shown) {
 			// blind stepping landed somewhere injectable, so the rest of the
 			// gesture gets a list and a proper commit
-		gesture.mode = commitPolicy({ hasContentScript: true, ctrlDown });
+		gesture.mode = commitPolicy({
+			hasContentScript: true,
+			ctrlDown: heldOn(gesture.hostTabId),
+		});
 	}
 
 	armTimers();
@@ -535,7 +648,19 @@ chrome.commands.onCommand.addListener((name) => {
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
 	switch (message?.type) {
 		case "ctrl":
-			ctrlDown = message.down;
+				// a page that lost focus with Control down: the release is
+				// going somewhere no page hears it.  that ends this tab's claim
+				// to a held key and nothing else -- leaving the window is the
+				// blur message's to commit.
+			if (message.lost) {
+				if (ctrl.tabId === sender.tab?.id) {
+					ctrl = { down: false, tabId: null };
+				}
+
+				break;
+			}
+
+			ctrl = { down: message.down, tabId: message.down ? sender.tab?.id ?? null : null };
 
 				// once typing has started, letting go of Control is how you
 				// type the rest; Enter is what chooses
@@ -552,7 +677,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
 			// and every later gesture would wait for a release that already
 			// happened somewhere we cannot see.
 		case "blur":
-			ctrlDown = false;
+			ctrl = { down: false, tabId: null };
 				// a search you walked away from was not a choice
 			run(() => (gesture?.search ? cancel() : commit()));
 			break;
@@ -597,35 +722,23 @@ chrome.tabs.onActivated.addListener(({ tabId }) => {
 		return;
 	}
 
-	run(async () => {
-		await liveOrder();
-		order = touch(order, tabId);
-		save();
-	});
+	apply((current) => touch(current, tabId));
 });
 
 
 chrome.tabs.onCreated.addListener((tab) => {
-	run(async () => {
-		await liveOrder();
-		order = insertNext(order, tab.id);
-		save();
-	});
+	apply((current) => insertNext(current, tab.id));
 });
 
 
 chrome.tabs.onRemoved.addListener((tabId) => {
-	run(async () => {
-		await liveOrder();
-		order = remove(order, tabId);
-		save();
-	});
+	apply((current) => remove(current, tabId));
 });
 
 
 chrome.windows.onFocusChanged.addListener((windowId) => {
 	if (windowId === chrome.windows.WINDOW_ID_NONE) {
-		ctrlDown = false;
+		ctrl = { down: false, tabId: null };
 
 		return;
 	}
@@ -634,15 +747,12 @@ chrome.windows.onFocusChanged.addListener((windowId) => {
 		return;
 	}
 
-	run(async () => {
-		const [tab] = await chrome.tabs.query({ active: true, windowId });
-
-		if (tab) {
-			await liveOrder();
-			order = touch(order, tab.id);
-			save();
+	chrome.tabs.query({ active: true, windowId }).then(([tab]) => {
+			// the gesture may have started while the query was out
+		if (tab && !gesture) {
+			apply((current) => touch(current, tab.id));
 		}
-	});
+	}, () => {});
 });
 
 

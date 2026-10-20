@@ -34,6 +34,9 @@ let searching = false;
 	// even when it lands after the list has closed
 const held = new Set();
 
+	// a Control press this frame heard and has not heard released
+let ctrlHeld = false;
+
 	// the worker can be evicted mid-gesture, taking the hide message with it.
 	// the overlay removes itself rather than being left painted over the page.
 let orphanTimer = null;
@@ -91,6 +94,7 @@ window.addEventListener("keydown", (event) => {
 
 		// a held modifier does not auto-repeat on macOS but does elsewhere
 	if (event.key === "Control" && !event.repeat) {
+		ctrlHeld = true;
 		send({ type: "ctrl", down: true });
 	}
 
@@ -134,6 +138,7 @@ window.addEventListener("keyup", (event) => {
 	}
 
 	if (event.key === "Control") {
+		ctrlHeld = false;
 		send({ type: "ctrl", down: false });
 	}
 
@@ -150,16 +155,34 @@ window.addEventListener("keyup", (event) => {
 	// that case and false only when focus has really left the tab, and it reads
 	// correctly one tick after the event.
 window.addEventListener("blur", () => {
-	if (!sessionOn || !isTop) {
-		return;
-	}
-
 	setTimeout(() => {
-		if (sessionOn && !document.hasFocus()) {
+		if (document.hasFocus()) {
+			return;
+		}
+
+		if (sessionOn && isTop) {
 			send({ type: "blur" });
 		}
+
+		lose();
 	}, 0);
 });
+
+
+	// focus left with Control down -- to the omnibox, DevTools, another tab or
+	// a new document in this one -- so its release will land where no page
+	// hears it.  without this the worker goes on believing Control is held,
+	// and the next gesture on this tab waits out the ten second ceiling.
+function lose()
+{
+	if (ctrlHeld) {
+		ctrlHeld = false;
+		send({ type: "ctrl", down: false, lost: true });
+	}
+}
+
+
+window.addEventListener("pagehide", lose);
 
 
 chrome.runtime.onMessage.addListener((message, sender, respond) => {

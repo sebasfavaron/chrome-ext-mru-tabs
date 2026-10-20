@@ -323,6 +323,54 @@ test("a modifier that was never seen commits on settle", async () => {
 });
 
 
+test("a Control held on another tab does not hold up this one", async () => {
+	const alpha = await openPage("alpha");
+	const beta = await openPage("beta");
+	const gamma = await openPage("gamma");
+
+		// pressed on gamma and released where no page hears it -- the new tab
+		// page, the omnibox -- so gamma's press is the last word on Control
+	await gamma.keyboard.down("Control");
+	await gamma.waitForTimeout(100);
+	await beta.bringToFront();
+	await beta.waitForTimeout(200);
+
+	const started = Date.now();
+
+	await gesture(Forward);
+	await beta.waitForTimeout(600);
+
+	assert.equal(await activeTitle(), "gamma", "committed on settle, not the 10s ceiling");
+	assert.ok(Date.now() - started < 2000);
+
+	await gamma.keyboard.up("Control");
+	await Promise.all([alpha.close(), beta.close(), gamma.close()]);
+});
+
+
+test("a Control whose release was lost to a reload does not hold up the tab", async () => {
+	const alpha = await openPage("alpha");
+	const beta = await openPage("beta");
+
+		// the press reaches beta's old document; the release would reach a
+		// document that never saw it go down, so it is as good as lost
+	await beta.keyboard.down("Control");
+	await beta.waitForTimeout(100);
+	await beta.reload();
+	await beta.waitForFunction(() => document.readyState === "complete");
+	await beta.waitForTimeout(200);
+
+	await gesture(Forward);
+	await beta.waitForTimeout(600);
+
+	assert.equal(await activeTitle(), "alpha", "committed on settle, not the 10s ceiling");
+	assert.equal(await overlayShowing(beta), false);
+
+	await beta.keyboard.up("Control");
+	await Promise.all([alpha.close(), beta.close()]);
+});
+
+
 test("escape closes the list and stays put", async () => {
 	const alpha = await openPage("alpha");
 	const beta = await openPage("beta");
